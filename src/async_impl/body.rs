@@ -5,8 +5,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http_body::Body as HttpBody;
-use http_body_util::combinators::BoxBody;
-//use sync_wrapper::SyncWrapper;
+use http_body_util::combinators::{UnsyncBoxBody};
 #[cfg(feature = "stream")]
 use tokio::fs::File;
 use tokio::time::Sleep;
@@ -20,7 +19,7 @@ pub struct Body {
 
 enum Inner {
     Reusable(Bytes),
-    Streaming(BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>),
+    Streaming(UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>),
 }
 
 /// A body with a total timeout.
@@ -73,7 +72,7 @@ impl Body {
     #[cfg_attr(docsrs, doc(cfg(feature = "stream")))]
     pub fn wrap_stream<S>(stream: S) -> Body
     where
-        S: futures_core::stream::TryStream + Send + Sync + 'static,
+        S: futures_core::stream::TryStream + Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<S::Ok>,
     {
@@ -83,21 +82,21 @@ impl Body {
     #[cfg(any(feature = "stream", feature = "multipart", feature = "blocking"))]
     pub(crate) fn stream<S>(stream: S) -> Body
     where
-        S: futures_core::stream::TryStream + Send + Sync + 'static,
+        S: futures_core::stream::TryStream + Send + 'static,
         S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
         Bytes: From<S::Ok>,
     {
         use futures_util::TryStreamExt;
         use http_body::Frame;
-        use http_body_util::StreamBody;
+        use http_body_util::{BodyExt, StreamBody};
 
-        let body = http_body_util::BodyExt::boxed(StreamBody::new(
+        let body = http_body_util::BodyExt::boxed_unsync(StreamBody::new(
             stream
                 .map_ok(|d| Frame::data(Bytes::from(d)))
                 .map_err(Into::into),
         ));
         Body {
-            inner: Inner::Streaming(body),
+            inner: Inner::Streaming(body.boxed_unsync()),
         }
     }
 
@@ -125,7 +124,7 @@ impl Body {
     // pub?
     pub(crate) fn streaming<B>(inner: B) -> Body
     where
-        B: HttpBody + Send + Sync + 'static,
+        B: HttpBody + Send + 'static,
         B::Data: Into<Bytes>,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
@@ -133,8 +132,7 @@ impl Body {
 
         let boxed = inner
             .map_frame(|f| f.map_data(Into::into))
-            .map_err(Into::into)
-            .boxed();
+            .map_err(Into::into).boxed_unsync();
 
         Body {
             inner: Inner::Streaming(boxed),
@@ -309,7 +307,7 @@ where
 }
 
 pub(crate) type ResponseBody =
-    http_body_util::combinators::BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+    http_body_util::combinators::UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 
 pub(crate) fn response(
     body: hyper::body::Incoming,
@@ -318,9 +316,9 @@ pub(crate) fn response(
     use http_body_util::BodyExt;
 
     if let Some(timeout) = timeout {
-        total_timeout(body, timeout).map_err(Into::into).boxed()
+        total_timeout(body, timeout).map_err(Into::into).boxed_unsync()
     } else {
-        body.map_err(Into::into).boxed()
+        body.map_err(Into::into).boxed_unsync()
     }
 }
 
